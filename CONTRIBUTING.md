@@ -2,6 +2,56 @@
 
 Thank you for your interest in contributing to Clowder AI! This guide will help you get started.
 
+## For Beta Testers (Internal Preview)
+
+You have **Read** access to this repo. Here's how to contribute:
+
+### Step-by-step: Submit a PR
+
+```bash
+# 1. Fork this repo (click "Fork" button on GitHub, or use gh cli)
+gh repo fork zts212653/clowder-ai --clone
+cd clowder-ai
+
+# 2. Create a feature branch
+git checkout -b feat/your-feature-name
+
+# 3. Install and verify
+pnpm install
+pnpm check
+
+# 4. Make your changes, then run checks
+pnpm check          # Biome lint
+pnpm lint           # TypeScript type check
+pnpm --filter @cat-cafe/api run test:public  # Public test suite
+
+# 5. Commit and push to YOUR fork
+git add -A
+git commit -m "feat(scope): description of your change"
+git push origin feat/your-feature-name
+
+# 6. Open a PR from your fork → zts212653/clowder-ai main
+gh pr create --repo zts212653/clowder-ai
+```
+
+### Report bugs or suggest features
+
+- Open an [Issue](https://github.com/zts212653/clowder-ai/issues) — please include reproduction steps for bugs
+- Check [pinned issues](https://github.com/zts212653/clowder-ai/issues) for current focus areas
+
+### What you CAN do with Read access
+
+- Clone, pull, and read all code
+- Fork and submit Pull Requests
+- Open and comment on Issues
+- Participate in Discussions
+
+### Runtime ports
+
+The default ports are `3003` (API) and `3004` (Frontend). See [SETUP.md](SETUP.md) for full configuration.
+
+---
+
 ## Code of Conduct
 
 Be respectful, constructive, and collaborative. We welcome contributors of all experience levels.
