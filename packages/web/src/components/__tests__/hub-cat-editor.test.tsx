@@ -856,6 +856,116 @@ describe('HubCatEditor', () => {
     expect(payload.accountRef).toBeUndefined();
   });
 
+  it('auto-selects a provider binding when switching an existing member client', async () => {
+    const existingCat = {
+      id: 'runtime-reviewer',
+      name: 'runtime-reviewer',
+      displayName: 'Runtime Reviewer',
+      provider: 'anthropic',
+      providerProfileId: 'claude-oauth',
+      defaultModel: 'claude-opus-4-6',
+      color: { primary: '#5B8C5A', secondary: '#D4E6D3' },
+      mentionPatterns: ['@runtime-reviewer'],
+      avatar: '/avatars/reviewer.png',
+      roleDescription: 'review',
+      source: 'runtime',
+    } as CatData;
+
+    mockApiFetch.mockImplementation((path: string, init?: RequestInit) => {
+      if (path === '/api/provider-profiles') {
+        return Promise.resolve(
+          jsonResponse({
+            projectPath: '/tmp/project',
+            activeProfileId: 'claude-oauth',
+            providers: [
+              {
+                id: 'claude-oauth',
+                provider: 'claude-oauth',
+                displayName: 'Claude (OAuth)',
+                name: 'Claude (OAuth)',
+                authType: 'oauth',
+                protocol: 'anthropic',
+                builtin: true,
+                mode: 'subscription',
+                models: ['claude-opus-4-6'],
+                hasApiKey: false,
+                createdAt: '2026-03-18T00:00:00.000Z',
+                updatedAt: '2026-03-18T00:00:00.000Z',
+              },
+              {
+                id: 'codex-oauth',
+                provider: 'codex-oauth',
+                displayName: 'Codex (OAuth)',
+                name: 'Codex (OAuth)',
+                authType: 'oauth',
+                protocol: 'openai',
+                builtin: true,
+                mode: 'subscription',
+                models: ['gpt-5.4-mini'],
+                hasApiKey: false,
+                createdAt: '2026-03-18T00:00:00.000Z',
+                updatedAt: '2026-03-18T00:00:00.000Z',
+              },
+              {
+                id: 'codex-sponsor',
+                provider: 'codex-sponsor',
+                displayName: 'Codex Sponsor',
+                name: 'Codex Sponsor',
+                authType: 'api_key',
+                protocol: 'openai',
+                builtin: false,
+                mode: 'api_key',
+                models: ['gpt-5.4-mini'],
+                hasApiKey: true,
+                createdAt: '2026-03-18T00:00:00.000Z',
+                updatedAt: '2026-03-18T00:00:00.000Z',
+              },
+            ],
+          }),
+        );
+      }
+      if (path === '/api/config/session-strategy') {
+        return Promise.resolve(jsonResponse({ cats: [] }));
+      }
+      if (path === '/api/config' && !init?.method) {
+        return Promise.resolve(jsonResponse({ config: { cli: {}, codexExecution: {} } }));
+      }
+      if (path === '/api/cats/runtime-reviewer' && init?.method === 'PATCH') {
+        return Promise.resolve(jsonResponse({ cat: { id: 'runtime-reviewer' } }));
+      }
+      throw new Error(`Unexpected apiFetch path: ${path}`);
+    });
+
+    await act(async () => {
+      root.render(
+        React.createElement(HubCatEditor, { open: true, cat: existingCat, onClose: vi.fn(), onSaved: vi.fn() }),
+      );
+    });
+    await flushEffects();
+
+    await changeField(queryField(container, 'select[aria-label="Client"]'), 'openai', 'change');
+    await flushEffects();
+
+    expect(queryField<HTMLSelectElement>(container, 'select[aria-label="认证信息"]').value).toBe('codex-oauth');
+    await changeField(queryField(container, 'input[aria-label="Model"]'), 'gpt-5.4-mini');
+
+    const saveButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === '保存修改',
+    );
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushEffects();
+
+    const patchCall = mockApiFetch.mock.calls.find(
+      ([path, init]) => path === '/api/cats/runtime-reviewer' && init?.method === 'PATCH',
+    );
+    expect(patchCall).toBeTruthy();
+    const payload = JSON.parse(String(patchCall?.[1]?.body));
+    expect(payload.client).toBe('openai');
+    expect(payload.accountRef).toBe('codex-oauth');
+  });
+
   it('keeps unbound opencode members unbound until a provider is chosen', async () => {
     const existingCat = {
       id: 'runtime-opencode',

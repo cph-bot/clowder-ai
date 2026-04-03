@@ -48,6 +48,7 @@ export function HubCatEditor({ cat, draft, open, onClose, onSaved }: HubCatEdito
   const [codexSettingsError, setCodexSettingsError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [pendingClientAccountAutofill, setPendingClientAccountAutofill] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, boolean>>({});
   const [form, setForm] = useState<HubCatEditorFormState>(() => initialState(cat, draft));
   const [strategyForm, setStrategyForm] = useState<StrategyFormState | null>(null);
@@ -78,6 +79,7 @@ export function HubCatEditor({ cat, draft, open, onClose, onSaved }: HubCatEdito
     setStrategyBaselineHasOverride(false);
     setCodexSettingsBaseline(null);
     setHasUnsavedChanges(false);
+    setPendingClientAccountAutofill(false);
   }, [open, cat, draft]);
 
   // Re-fetch profiles when Provider Profiles page creates/saves/deletes an account.
@@ -186,10 +188,11 @@ export function HubCatEditor({ cat, draft, open, onClose, onSaved }: HubCatEdito
   useEffect(() => {
     if (form.client === 'antigravity') {
       setForm((prev) => (prev.accountRef === '' ? prev : { ...prev, accountRef: '' }));
+      if (pendingClientAccountAutofill) setPendingClientAccountAutofill(false);
       return;
     }
     setForm((prev) => {
-      if (prev.accountRef.trim().length === 0 && (cat || !draft)) {
+      if (prev.accountRef.trim().length === 0 && !pendingClientAccountAutofill && (cat || !draft)) {
         return prev;
       }
       if (availableProfiles.length === 0) return prev;
@@ -203,7 +206,10 @@ export function HubCatEditor({ cat, draft, open, onClose, onSaved }: HubCatEdito
       if (prev.accountRef === nextProfile.id) return prev;
       return { ...prev, accountRef: nextProfile.id };
     });
-  }, [availableProfiles, cat, draft, form.client]);
+    if (pendingClientAccountAutofill && availableProfiles.length > 0) {
+      setPendingClientAccountAutofill(false);
+    }
+  }, [availableProfiles, cat, draft, form.client, pendingClientAccountAutofill]);
 
   useEffect(() => {
     if (form.client === 'antigravity' || modelOptions.length === 0) return;
@@ -230,6 +236,9 @@ export function HubCatEditor({ cat, draft, open, onClose, onSaved }: HubCatEdito
 
   const patchForm = (patch: Partial<HubCatEditorFormState>) => {
     setHasUnsavedChanges(true);
+    if (patch.client !== undefined && patch.client !== form.client) {
+      setPendingClientAccountAutofill(true);
+    }
     setForm((prev) => ({ ...prev, ...patch }));
     if (patch.mentionPatterns !== undefined) {
       setFieldErrors((prev) => ({ ...prev, routing: false }));
