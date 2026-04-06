@@ -8,6 +8,7 @@ import { describe, it } from 'node:test';
 const {
   loadCatConfig,
   getDefaultVariant,
+  getCatEffort,
   toFlatConfigs,
   toAllCatConfigs,
   findBreedByMention,
@@ -740,6 +741,21 @@ describe('F32-b P4c: personality fallback to default variant', () => {
     const config = loadCatConfig(writeTempConfig(multiVariantConfig()));
     const all = toAllCatConfigs(config);
     assert.equal(all.opus.personality, '温柔');
+  });
+});
+
+describe('getCatEffort', () => {
+  it('normalizes stale cross-provider effort values before invocation', () => {
+    const cfg = validConfig();
+    cfg.breeds[0].variants[0].provider = 'openai';
+    cfg.breeds[0].variants[0].cli = {
+      command: 'claude',
+      outputFormat: 'stream-json',
+      effort: 'max',
+    };
+    const config = loadCatConfig(writeTempConfig(cfg));
+
+    assert.equal(getCatEffort('opus', config), 'xhigh');
   });
 });
 

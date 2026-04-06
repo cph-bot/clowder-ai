@@ -9,6 +9,7 @@ import { type CatConfig, type CatProvider, type ContextBudget, catRegistry, type
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import {
+  builtinAccountIdForClient,
   resolveBuiltinClientForProvider,
   resolveByAccountRef,
   resolveForClient,
@@ -198,6 +199,12 @@ function resolveAccountRef(body: {
   return undefined;
 }
 
+function resolveDefaultAccountRefForClient(projectRoot: string, client: CatProvider): string | undefined {
+  const builtinClient = resolveBuiltinClientForProvider(client);
+  if (!builtinClient) return undefined;
+  return resolveForClient(projectRoot, builtinClient)?.id ?? builtinAccountIdForClient(builtinClient);
+}
+
 function buildEffectiveAccountRefResolver(projectRoot: string) {
   const inheritedBindingCache = new Map<string, Promise<string | undefined>>();
 
@@ -211,7 +218,9 @@ function buildEffectiveAccountRefResolver(projectRoot: string) {
 
     let runtimeProfilePromise = inheritedBindingCache.get(builtinClient);
     if (!runtimeProfilePromise) {
-      runtimeProfilePromise = Promise.resolve(resolveForClient(projectRoot, builtinClient)?.id);
+      runtimeProfilePromise = Promise.resolve(
+        resolveForClient(projectRoot, builtinClient, builtinAccountIdForClient(builtinClient))?.id,
+      );
       inheritedBindingCache.set(builtinClient, runtimeProfilePromise);
     }
     return (await runtimeProfilePromise) ?? cat.accountRef;
@@ -503,14 +512,24 @@ export const catsRoutes: FastifyPluginAsync = async (app) => {
     }
     const effectiveClient = body.client ?? currentCat.provider;
     const nextAccountRef = resolveAccountRef(body);
+    const isClientSwitch = body.client !== undefined && body.client !== currentCat.provider;
+    const currentExplicitAccountRef = resolveBoundAccountRefForCat(projectRoot, request.params.id, currentCat);
     const currentEffectiveAccountRef = await resolveEffectiveAccountRef(currentCat);
+    const carriesCurrentEffectiveBinding =
+      nextAccountRef !== undefined && (nextAccountRef ?? undefined) === currentEffectiveAccountRef;
+    const normalizedNextAccountRef =
+      isClientSwitch && !currentExplicitAccountRef && carriesCurrentEffectiveBinding ? undefined : nextAccountRef;
     const effectiveAccountRef =
-      nextAccountRef !== undefined ? (nextAccountRef ?? undefined) : currentEffectiveAccountRef;
+      normalizedNextAccountRef !== undefined
+        ? (normalizedNextAccountRef ?? undefined)
+        : isClientSwitch && !currentExplicitAccountRef
+          ? resolveDefaultAccountRefForClient(projectRoot, effectiveClient)
+          : currentEffectiveAccountRef;
     const effectiveDefaultModel = body.defaultModel !== undefined ? body.defaultModel : currentCat.defaultModel;
     const providerConfigTouched =
       body.client !== undefined ||
       body.defaultModel !== undefined ||
-      nextAccountRef !== undefined ||
+      normalizedNextAccountRef !== undefined ||
       body.ocProviderName !== undefined;
 
     if (providerConfigTouched) {
@@ -522,8 +541,8 @@ export const catsRoutes: FastifyPluginAsync = async (app) => {
         // NOT allowed when: switching accountRef, or switching client to opencode
         // from another provider — both create a new binding that must have ocProviderName.
         // Compare against current binding — editor always sends accountRef even when unchanged.
-        const isBindingChange = nextAccountRef !== undefined && nextAccountRef !== currentEffectiveAccountRef;
-        const isClientSwitch = body.client !== undefined && body.client !== currentCat.provider;
+        const isBindingChange =
+          normalizedNextAccountRef !== undefined && normalizedNextAccountRef !== currentEffectiveAccountRef;
         const isExistingOpencode = currentCat.provider === 'opencode';
         const legacyCompat =
           body.ocProviderName === undefined &&
@@ -550,15 +569,22 @@ export const catsRoutes: FastifyPluginAsync = async (app) => {
     try {
       const hasCommandArgsPatch = body.commandArgs !== undefined;
       const nextCommandArgs = body.commandArgs ?? [];
-      const antigravityCliPatch =
-        body.client === 'antigravity' || (currentCat.provider === 'antigravity' && hasCommandArgsPatch)
-          ? {
-              cli: {
-                ...defaultCliForClient('antigravity'),
-                ...(hasCommandArgsPatch && nextCommandArgs.length > 0 ? { defaultArgs: nextCommandArgs } : {}),
-              },
-            }
-          : {};
+      const nextCli =
+        body.cli !== undefined
+          ? body.cli
+          : isClientSwitch
+            ? {
+                ...defaultCliForClient(effectiveClient),
+                ...(effectiveClient === 'antigravity' && hasCommandArgsPatch && nextCommandArgs.length > 0
+                  ? { defaultArgs: nextCommandArgs }
+                  : {}),
+              }
+            : body.client === 'antigravity' || (currentCat.provider === 'antigravity' && hasCommandArgsPatch)
+              ? {
+                  ...defaultCliForClient('antigravity'),
+                  ...(hasCommandArgsPatch && nextCommandArgs.length > 0 ? { defaultArgs: nextCommandArgs } : {}),
+                }
+              : undefined;
       updateRuntimeCat(projectRoot, request.params.id, {
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.displayName !== undefined ? { displayName: body.displayName } : {}),
@@ -566,7 +592,7 @@ export const catsRoutes: FastifyPluginAsync = async (app) => {
         ...(body.avatar !== undefined ? { avatar: body.avatar } : {}),
         ...(body.color !== undefined ? { color: body.color } : {}),
         ...(body.mentionPatterns !== undefined ? { mentionPatterns: body.mentionPatterns } : {}),
-        ...(nextAccountRef !== undefined ? { accountRef: nextAccountRef } : {}),
+        ...(normalizedNextAccountRef !== undefined ? { accountRef: normalizedNextAccountRef } : {}),
         ...(body.contextBudget !== undefined ? { contextBudget: body.contextBudget } : {}),
         ...(body.roleDescription !== undefined ? { roleDescription: body.roleDescription } : {}),
         ...(body.personality !== undefined ? { personality: body.personality } : {}),
@@ -579,12 +605,10 @@ export const catsRoutes: FastifyPluginAsync = async (app) => {
         ...(body.mcpSupport !== undefined ? { mcpSupport: body.mcpSupport } : {}),
         ...(hasCommandArgsPatch
           ? {
-              ...antigravityCliPatch,
               commandArgs: body.commandArgs,
             }
           : {}),
-        ...(!hasCommandArgsPatch ? antigravityCliPatch : {}),
-        ...(body.cli !== undefined ? { cli: body.cli } : {}),
+        ...(nextCli !== undefined ? { cli: nextCli } : {}),
         ...(body.available !== undefined ? { available: body.available } : {}),
         ...(body.cliConfigArgs !== undefined ? { cliConfigArgs: body.cliConfigArgs } : {}),
         ...(body.ocProviderName !== undefined

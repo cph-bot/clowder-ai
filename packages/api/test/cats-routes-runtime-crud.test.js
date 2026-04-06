@@ -1293,6 +1293,84 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     assert.equal(patchBody.cat.accountRef, sponsorProfile.id);
   });
 
+  it('PATCH /api/cats/:id rebases inherited seed binding when switching client families', async () => {
+    const projectRoot = createProjectRoot();
+    process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
+
+    const Fastify = (await import('fastify')).default;
+    const { catsRoutes } = await import('../dist/routes/cats.js');
+    const app = Fastify();
+    await app.register(catsRoutes);
+
+    const beforeRes = await app.inject({ method: 'GET', url: '/api/cats' });
+    assert.equal(beforeRes.statusCode, 200);
+    const beforeBody = JSON.parse(beforeRes.body);
+    const opusBefore = beforeBody.cats.find((cat) => cat.id === 'opus');
+    assert.ok(opusBefore, 'seed opus member must exist');
+    assert.equal(opusBefore.provider, 'anthropic');
+    assert.equal(opusBefore.accountRef, 'claude');
+
+    const patchRes = await app.inject({
+      method: 'PATCH',
+      url: '/api/cats/opus',
+      headers: {
+        'content-type': 'application/json',
+        'x-cat-cafe-user': 'codex',
+      },
+      // Simulate editor payload carrying the previous visible accountRef while switching client.
+      body: JSON.stringify({
+        client: 'openai',
+        defaultModel: 'gpt-5.4',
+        providerProfileId: opusBefore.accountRef,
+      }),
+    });
+
+    assert.equal(patchRes.statusCode, 200);
+    const patchBody = JSON.parse(patchRes.body);
+    assert.equal(patchBody.cat.provider, 'openai');
+    assert.equal(patchBody.cat.defaultModel, 'gpt-5.4');
+    assert.equal(patchBody.cat.accountRef, 'codex');
+  });
+
+  it('PATCH /api/cats/:id resets stale CLI config when switching client families', async () => {
+    const projectRoot = createProjectRootFromRepoTemplate();
+    process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
+
+    const Fastify = (await import('fastify')).default;
+    const { catsRoutes } = await import('../dist/routes/cats.js');
+    const app = Fastify();
+    await app.register(catsRoutes);
+
+    const beforeRes = await app.inject({ method: 'GET', url: '/api/cats' });
+    assert.equal(beforeRes.statusCode, 200);
+    const beforeBody = JSON.parse(beforeRes.body);
+    const opusBefore = beforeBody.cats.find((cat) => cat.id === 'opus');
+    assert.ok(opusBefore, 'seed opus member must exist');
+
+    const patchRes = await app.inject({
+      method: 'PATCH',
+      url: '/api/cats/opus',
+      headers: {
+        'content-type': 'application/json',
+        'x-cat-cafe-user': 'codex',
+      },
+      body: JSON.stringify({
+        client: 'openai',
+        defaultModel: 'gpt-5.4',
+        providerProfileId: opusBefore.accountRef,
+      }),
+    });
+
+    assert.equal(patchRes.statusCode, 200);
+
+    const runtimeCatalog = JSON.parse(readFileSync(join(projectRoot, '.cat-cafe', 'cat-catalog.json'), 'utf-8'));
+    const opusBreed = runtimeCatalog.breeds.find((breed) => breed.catId === 'opus');
+    assert.ok(opusBreed, 'runtime opus breed should exist');
+    const opusVariant = opusBreed.variants.find((variant) => variant.id === opusBreed.defaultVariantId);
+    assert.ok(opusVariant, 'runtime opus default variant should exist');
+    assert.deepEqual(opusVariant.cli, { command: 'codex', outputFormat: 'json' });
+  });
+
   it('PATCH /api/cats/:id allows non-provider edits for unbound opencode seed member', async () => {
     if (savedTemplatePath === undefined) {
       delete process.env.CAT_TEMPLATE_PATH;
