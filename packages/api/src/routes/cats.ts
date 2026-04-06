@@ -250,6 +250,13 @@ function resolveDefaultAccountRefForClient(projectRoot: string, client: CatProvi
   return resolveForClient(projectRoot, builtinClient)?.id ?? builtinAccountIdForClient(builtinClient);
 }
 
+/**
+ * Resolve the accountRef that should be persisted for this PATCH.
+ *
+ * Seed members can inherit a provider binding from the current default account.
+ * When the editor echoes that inherited binding back during a client switch, we
+ * intentionally drop it instead of persisting a stale explicit binding.
+ */
 function resolveTargetAccountRef(params: {
   body: UpdateCatRequestBody;
   currentCat: CatConfig;
@@ -266,6 +273,11 @@ function resolveTargetAccountRef(params: {
   return isClientSwitch && !currentExplicitAccountRef && carriesCurrentEffectiveBinding ? undefined : nextAccountRef;
 }
 
+/**
+ * Resolve the effective accountRef for validation after applying a PATCH.
+ * This may differ from the persisted value when a seed member continues to
+ * inherit the default binding of the newly selected client family.
+ */
 function resolveEffectiveAccountRefForUpdate(params: {
   projectRoot: string;
   body: UpdateCatRequestBody;
@@ -294,6 +306,17 @@ function resolveEffectiveAccountRefForUpdate(params: {
   return currentEffectiveAccountRef;
 }
 
+/**
+ * Resolve the target CLI config when patching a cat.
+ *
+ * Rules:
+ * - Explicit body.cli takes precedence (including any effort value user sets)
+ * - Provider switch: reset CLI to new provider's default (command, outputFormat, effort)
+ * - antigravity commandArgs patch: preserve defaultArgs while using antigravity CLI
+ *
+ * Note: When switching providers, stale effort values from the previous provider
+ * are reset to the new provider's default to avoid cross-provider mismatches.
+ */
 function resolveNextCli(params: {
   body: UpdateCatRequestBody;
   currentCat: CatConfig;
@@ -681,12 +704,15 @@ export const catsRoutes: FastifyPluginAsync = async (app) => {
         // Compare against current binding — editor always sends accountRef even when unchanged.
         const isBindingChange = targetAccountRef !== undefined && targetAccountRef !== currentEffectiveAccountRef;
         const isClientSwitch = body.client !== undefined && body.client !== currentCat.provider;
+        // Compare against current binding — editor always sends accountRef even when unchanged.
+        const isBindingChange = targetAccountRef !== undefined && targetAccountRef !== currentEffectiveAccountRef;
+        const isClientSwitch = body.client !== undefined && body.client !== currentCat.provider;
         const isExistingOpencode = currentCat.provider === 'opencode';
         const legacyCompat =
           body.ocProviderName === undefined &&
           !currentCat.ocProviderName &&
           !isBindingChange &&
-          !isClientSwitch &&
+          !(body.client !== undefined && body.client !== currentCat.provider) &&
           isExistingOpencode;
         await validateAccountBindingOrThrow(
           projectRoot,

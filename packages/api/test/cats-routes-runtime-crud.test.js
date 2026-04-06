@@ -1412,6 +1412,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     const app = Fastify();
     await app.register(catsRoutes);
 
+    // First, set a non-default CLI config (including effort) on opus (anthropic)
     const firstPatchRes = await app.inject({
       method: 'PATCH',
       url: '/api/cats/opus',
@@ -1423,18 +1424,20 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
         cli: {
           command: 'claude',
           outputFormat: 'stream-json',
-          effort: 'low',
+          effort: 'low', // Non-default for anthropic (default is 'max')
         },
       }),
     });
 
     assert.equal(firstPatchRes.statusCode, 200);
 
+    // Verify the non-default effort was persisted
     let runtimeCatalog = JSON.parse(readFileSync(join(projectRoot, '.cat-cafe', 'cat-catalog.json'), 'utf-8'));
     let opusBreed = runtimeCatalog.breeds.find((breed) => breed.catId === 'opus');
     let opusVariant = opusBreed.variants.find((variant) => variant.id === opusBreed.defaultVariantId);
-    assert.equal(opusVariant.cli.effort, 'low', 'non-default effort should be persisted before client switch');
+    assert.equal(opusVariant.cli.effort, 'low', 'non-default effort should be persisted');
 
+    // Now switch to openai provider
     const patchRes = await app.inject({
       method: 'PATCH',
       url: '/api/cats/opus',
@@ -1453,16 +1456,20 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     assert.equal(patchBody.cat.provider, 'openai');
     assert.equal(patchBody.cat.defaultModel, 'gpt-5.4');
 
+    // Verify CLI was reset to openai defaults (including effort)
     runtimeCatalog = JSON.parse(readFileSync(join(projectRoot, '.cat-cafe', 'cat-catalog.json'), 'utf-8'));
     opusBreed = runtimeCatalog.breeds.find((breed) => breed.catId === 'opus');
-    assert.ok(opusBreed, 'runtime opus breed should exist');
     opusVariant = opusBreed.variants.find((variant) => variant.id === opusBreed.defaultVariantId);
     assert.ok(opusVariant, 'runtime opus default variant should exist');
-    assert.deepEqual(opusVariant.cli, {
-      command: 'codex',
-      outputFormat: 'json',
-      effort: 'xhigh',
-    });
+    assert.deepEqual(
+      opusVariant.cli,
+      {
+        command: 'codex',
+        outputFormat: 'json',
+        effort: 'xhigh', // Reset to openai's default
+      },
+      'CLI should be reset to openai defaults including effort',
+    );
   });
 
   it('PATCH /api/cats/:id allows non-provider edits for unbound opencode seed member', async () => {

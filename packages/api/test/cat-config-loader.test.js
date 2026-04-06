@@ -839,6 +839,9 @@ describe('F32-b P4c: personality fallback to default variant', () => {
 });
 
 describe('getCatEffort', () => {
+  // Note: Stale cross-provider effort values are now cleaned at write time
+  // (when switching providers via PATCH /api/cats/:id), so runtime
+  // normalization is no longer needed here.
   it('returns effort from cli config if set', () => {
     const cfg = validConfig();
     cfg.breeds[0].variants[0].cli = {
