@@ -558,6 +558,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
                         govRefetch();
                       }}
                     />
+                    <AIPromptCard />
                   </div>
                 )}
                 {(() => {
@@ -751,5 +752,8 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
       <HubListModal open={showHubList} onClose={() => setShowHubList(false)} currentThreadId={threadId} />
       {showVoteModal && <VoteConfigModal onSubmit={handleVoteSubmit} onCancel={() => setShowVoteModal(false)} />}
     </div>
+  );
+}
+v>
   );
 }
