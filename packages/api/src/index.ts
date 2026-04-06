@@ -98,8 +98,6 @@ import {
   ConnectorInvokeTrigger,
   GhCliReviewContentFetcher,
   MemoryProcessedEmailStore,
-  MemoryPrTrackingStore,
-  RedisPrTrackingStore,
   ReviewFeedbackRouter,
   ReviewRouter,
   startGithubReviewWatcher,
@@ -166,6 +164,7 @@ import {
   threadBranchRoutes,
   threadCatsRoutes,
   threadsRoutes,
+  toolUsageRoutes,
   ttsRoutes,
   uploadsRoutes,
   usageRoutes,
@@ -175,7 +174,6 @@ import {
   workspaceRoutes,
 } from './routes/index.js';
 import { knowledgeFeedRoutes } from './routes/knowledge-feed.js';
-import { prTrackingRoutes } from './routes/pr-tracking.js';
 import { previewRoutes } from './routes/preview.js';
 import { terminalRoutes } from './routes/terminal.js';
 import { threadExportRoutes } from './routes/thread-export.js';
@@ -302,6 +300,15 @@ async function main(): Promise<void> {
   const deliveryCursorStore = new DeliveryCursorStore(sessionStore);
   const threadStore = createThreadStore(redis);
   const taskStore = createTaskStore(redis);
+  if (redis) {
+    const { RedisPrTrackingStore } = await import('./infrastructure/email/RedisPrTrackingStore.js');
+    const { backfillLegacyPrTracking } = await import('./infrastructure/email/backfill-legacy-pr-tracking.js');
+    await backfillLegacyPrTracking({
+      legacyStore: new RedisPrTrackingStore(redis),
+      taskStore,
+      log: app.log,
+    });
+  }
   const backlogStore = createBacklogStore(redis);
   const workflowSopStore = createWorkflowSopStore(redis);
   const summaryStore = createSummaryStore(redis);
@@ -527,6 +534,7 @@ async function main(): Promise<void> {
     templateRegistry,
     globalControlStore,
     packTemplateStore,
+    taskStore,
   });
 
   // ── Phase G: Summary Compaction (registers into unified scheduler) ──
@@ -809,6 +817,62 @@ async function main(): Promise<void> {
   const packStoreDir = join(findMonorepoRoot(process.cwd()), '.cat-cafe', 'packs');
   const packStore = new PackStore(packStoreDir);
 
+  // F150: Tool usage counter (fire-and-forget INCR on tool_use events)
+  const toolUsageArchiver = redis
+    ? new (await import('./domains/cats/services/tool-usage/ToolUsageArchiver.js')).ToolUsageArchiver(
+        join(findMonorepoRoot(process.cwd()), '.cat-cafe', 'tool-usage-archive.jsonl'),
+      )
+    : undefined;
+  const toolUsageCounter = redis
+    ? new (await import('./domains/cats/services/tool-usage/ToolUsageCounter.js')).ToolUsageCounter(
+        redis,
+        toolUsageArchiver,
+      )
+    : undefined;
+
+  // F150: Daily archive sweep — persist expiring Redis counters to JSONL
+  if (toolUsageCounter && toolUsageArchiver) {
+    const sweepLog = (await import('./infrastructure/logger.js')).createModuleLogger('tool-usage-sweep');
+    let sweepInFlight = false;
+    const runSweep = async () => {
+      if (sweepInFlight) return;
+      sweepInFlight = true;
+      try {
+        const archivedDates = await toolUsageArchiver.getArchivedDates();
+        // Catch-up: archive ALL unarchived dates older than 7 days (not just 85-89).
+        // Covers downtime gaps — any date still in Redis but not yet archived gets saved.
+        const now = new Date();
+        const targetDates = new Set<string>();
+        for (let offset = 7; offset <= 89; offset++) {
+          const d = new Date(now);
+          d.setDate(d.getDate() - offset);
+          const dateStr = d.toISOString().slice(0, 10);
+          if (!archivedDates.has(dateStr)) targetDates.add(dateStr);
+        }
+        if (targetDates.size === 0) return;
+        // Single SCAN for all dates, then filter client-side
+        const allEntries = await toolUsageCounter.fetchAllEntries();
+        let archived = 0;
+        for (const date of targetDates) {
+          const entries = allEntries.filter((e) => e.date === date);
+          if (entries.length > 0) {
+            archived += await toolUsageArchiver.archiveEntries(entries);
+          }
+        }
+        if (archived > 0) sweepLog.info({ archived }, 'Tool usage archive sweep completed');
+      } catch (err) {
+        sweepLog.warn({ err }, 'Tool usage archive sweep failed');
+      } finally {
+        sweepInFlight = false;
+      }
+    };
+    // First sweep 30s after startup, then daily
+    const startupTimer = setTimeout(runSweep, 30_000);
+    startupTimer.unref();
+    const dailyTimer = setInterval(runSweep, 24 * 60 * 60 * 1000);
+    dailyTimer.unref();
+  }
+
   // Shared AgentRouter — used by messagesRoutes and invocationsRoutes
   router = new AgentRouter({
     agentRegistry,
@@ -831,6 +895,7 @@ async function main(): Promise<void> {
     ...(agentPaneRegistry ? { agentPaneRegistry } : {}),
     signalArticleLookup: createSignalArticleLookup({ transcriptReader }),
     packStore,
+    ...(toolUsageCounter ? { toolUsageCounter } : {}),
   });
 
   const autoSummarizer = new AutoSummarizer({ messageStore, summaryStore });
@@ -934,6 +999,10 @@ async function main(): Promise<void> {
   await app.register(quotaRoutes);
   // F128: Daily token usage aggregation
   await app.register(usageRoutes, { invocationRecordStore });
+  // F150: Tool/Skill/MCP usage statistics
+  if (toolUsageCounter) {
+    await app.register(toolUsageRoutes, { toolUsageCounter });
+  }
   // F075 Phase B+C: Game + Achievement stores
   const { GameStore } = await import('./domains/leaderboard/game-store.js');
   const { AchievementStore } = await import('./domains/leaderboard/achievement-store.js');
@@ -973,10 +1042,6 @@ async function main(): Promise<void> {
 
     app.log.info('[api] F101 game routes registered');
   }
-
-  // TD091: Create prTrackingStore early so callbacks can use it for MCP registration
-  const prTrackingStore = redis ? new RedisPrTrackingStore(redis) : new MemoryPrTrackingStore();
-  app.log.info(`[api] PrTrackingStore: ${redis ? 'Redis' : 'Memory'}`);
 
   // Phase D (AC-D1): validate repo exists via `gh repo view` before PR tracking registration.
   // Generic — works for any GitHub repo the caller has access to, not hardcoded to ours.
@@ -1027,7 +1092,6 @@ async function main(): Promise<void> {
     invocationRecordStore,
     invocationTracker,
     deliveryCursorStore,
-    prTrackingStore,
     validateRepo,
     ...(workflowSopStore ? { workflowSopStore } : {}),
     queueProcessor,
@@ -1309,7 +1373,7 @@ async function main(): Promise<void> {
   // Must register routes BEFORE app.listen()
   const processedEmailStore = new MemoryProcessedEmailStore();
   const reviewRouter = new ReviewRouter({
-    prTrackingStore,
+    taskStore,
     processedEmailStore,
     threadStore,
     messageStore,
@@ -1318,7 +1382,6 @@ async function main(): Promise<void> {
     defaultUserId: 'default-user',
     reviewContentFetcher: new GhCliReviewContentFetcher(app.log),
   });
-  await app.register(prTrackingRoutes, { prTrackingStore, validateRepo });
 
   // F088: Register connector webhook routes BEFORE listen (Fastify requires it)
   const connectorWebhookHandlers = new Map<string, import('./routes/connector-webhooks.js').ConnectorWebhookHandler>();
@@ -1559,14 +1622,14 @@ async function main(): Promise<void> {
     const deliveryDeps = { messageStore, socketManager };
 
     const cicdRouter = new CiCdRouter({
-      prTrackingStore,
+      taskStore,
       deliveryDeps,
       log: app.log,
     });
 
     // F140: ConflictRouter (state-transition dedup + KD-9 fingerprint reset)
     const conflictRouter = new ConflictRouter({
-      prTrackingStore,
+      taskStore,
       deliveryDeps,
       log: app.log,
     });
@@ -1577,7 +1640,7 @@ async function main(): Promise<void> {
       log: app.log,
     });
 
-    taskRunnerV2.register(createCiCdCheckTaskSpec({ prTrackingStore, cicdRouter, invokeTrigger, log: app.log }));
+    taskRunnerV2.register(createCiCdCheckTaskSpec({ taskStore, cicdRouter, invokeTrigger, log: app.log }));
 
     // F140: conflict-check with ConflictRouter + urgent trigger
     const checkMergeable = async (repo: string, pr: number) => {
@@ -1600,7 +1663,7 @@ async function main(): Promise<void> {
 
     taskRunnerV2.register(
       createConflictCheckTaskSpec({
-        prTrackingStore,
+        taskStore,
         checkMergeable,
         conflictRouter,
         invokeTrigger,
@@ -1628,7 +1691,7 @@ async function main(): Promise<void> {
 
     taskRunnerV2.register(
       createReviewFeedbackTaskSpec({
-        prTrackingStore,
+        taskStore,
         fetchComments: async (repo, pr) => {
           const [reviewComments, issueComments] = await Promise.all([
             fetchPaginated(`/repos/${repo}/pulls/${pr}/comments`),
