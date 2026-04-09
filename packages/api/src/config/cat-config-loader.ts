@@ -688,10 +688,10 @@ export type CliEffortLevel = 'low' | 'medium' | 'high' | 'max' | 'xhigh';
  *   codex (openai):     'xhigh'
  *   others:             'high'
  *
-* Note: Stale cross-provider effort values are cleaned at write time in the
-* cats PATCH route, so runtime lookup only needs to read persisted values and
-* fall back to provider defaults.
-*/
+ * @note Stale cross-provider effort values are cleaned at write time in the
+ * cats PATCH route, so runtime lookup only needs to read persisted values and
+ * fall back to provider defaults.
+ */
 export function getCatEffort(catId: string, config?: CatCafeConfig, fallbackProvider?: CatProvider): CliEffortLevel {
   const cfg = config ?? getCachedConfig();
   if (!cfg) return getDefaultCliEffortForProvider(fallbackProvider ?? 'anthropic') ?? 'high';

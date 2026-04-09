@@ -12,8 +12,8 @@ import {
   type CliConfig,
   type ContextBudget,
   catRegistry,
-  getDefaultCliEffortForProvider,
   getCliEffortOptionsForProvider,
+  getDefaultCliEffortForProvider,
   isValidCliEffortForProvider,
   type RosterEntry,
 } from '@cat-cafe/shared';
