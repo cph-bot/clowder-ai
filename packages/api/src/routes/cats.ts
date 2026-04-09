@@ -705,8 +705,6 @@ export const catsRoutes: FastifyPluginAsync = async (app) => {
         const isBindingChange = targetAccountRef !== undefined && targetAccountRef !== currentEffectiveAccountRef;
         const isClientSwitch = body.client !== undefined && body.client !== currentCat.provider;
         // Compare against current binding — editor always sends accountRef even when unchanged.
-        const isBindingChange = targetAccountRef !== undefined && targetAccountRef !== currentEffectiveAccountRef;
-        const isClientSwitch = body.client !== undefined && body.client !== currentCat.provider;
         const isExistingOpencode = currentCat.provider === 'opencode';
         const legacyCompat =
           body.ocProviderName === undefined &&
