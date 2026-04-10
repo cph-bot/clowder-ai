@@ -21,7 +21,7 @@ import type {
   ReviewPolicy,
   Roster,
 } from '@cat-cafe/shared';
-import { createCatId, getDefaultCliEffortForProvider } from '@cat-cafe/shared';
+import { createCatId, getDefaultCliEffortForProvider, isValidCliEffortForProvider } from '@cat-cafe/shared';
 import { z } from 'zod';
 import { createModuleLogger } from '../infrastructure/logger.js';
 import { bootstrapCatCatalog, readCatCatalogRaw, resolveCatCatalogPath } from './cat-catalog-store.js';
@@ -702,9 +702,16 @@ export function getCatEffort(catId: string, config?: CatCafeConfig, fallbackProv
   }
 
   const variant = _catIdToVariant.get(catId);
-  if (variant?.cli.effort) return variant.cli.effort;
+  const effectiveProvider = variant?.provider ?? fallbackProvider ?? 'anthropic';
 
-  return getDefaultCliEffortForProvider(variant?.provider ?? fallbackProvider ?? 'anthropic') ?? 'high';
+  // Defense-in-depth: validate persisted effort against current provider.
+  // Write-time cleanup (PATCH route) prevents new stale values, but historical
+  // catalogs from before this fix may still carry cross-provider effort values.
+  if (variant?.cli.effort && isValidCliEffortForProvider(effectiveProvider, variant.cli.effort)) {
+    return variant.cli.effort;
+  }
+
+  return getDefaultCliEffortForProvider(effectiveProvider) ?? 'high';
 }
 
 // ── F149: ACP config accessor (raw variant field, not in CatConfig type) ──────

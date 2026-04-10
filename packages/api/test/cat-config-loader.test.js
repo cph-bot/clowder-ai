@@ -865,6 +865,22 @@ describe('getCatEffort', () => {
 
     assert.equal(getCatEffort('opus', config), 'xhigh');
   });
+
+  it('rejects stale cross-provider effort from historical data (defense-in-depth)', () => {
+    // Simulates a catalog written before the PATCH write-time cleanup was added:
+    // an openai cat still carrying anthropic-only effort 'max'.
+    const cfg = validConfig();
+    cfg.breeds[0].variants[0].provider = 'openai';
+    cfg.breeds[0].variants[0].cli = {
+      command: 'codex',
+      outputFormat: 'json',
+      effort: 'max', // invalid for openai — only anthropic supports 'max'
+    };
+    const config = loadCatConfig(writeTempConfig(cfg));
+
+    // Should fall back to openai default ('xhigh'), not return 'max'
+    assert.equal(getCatEffort('opus', config), 'xhigh');
+  });
 });
 
 describe('F32-b P4c: Sonnet variant in project config', () => {
