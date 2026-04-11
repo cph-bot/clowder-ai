@@ -354,6 +354,51 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     assert.match(JSON.parse(createRes.body).error, /effort/i);
   });
 
+  it('POST /api/cats accepts kimi client with first-class default CLI commands', async () => {
+    const projectRoot = createProjectRoot();
+    process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
+
+    const Fastify = (await import('fastify')).default;
+    const { catsRoutes } = await import('../dist/routes/cats.js');
+
+    const app = Fastify();
+    await app.register(catsRoutes);
+
+    try {
+      const kimiRes = await app.inject({
+        method: 'POST',
+        url: '/api/cats',
+        headers: {
+          'content-type': 'application/json',
+          'x-cat-cafe-user': 'codex',
+        },
+        body: JSON.stringify({
+          catId: 'runtime-kimi',
+          name: 'Kimi 猫',
+          displayName: 'Kimi 猫',
+          avatar: '/avatars/kimi.png',
+          color: { primary: '#7c3aed', secondary: '#ede9fe' },
+          mentionPatterns: ['@runtime-kimi'],
+          roleDescription: '中文代码助手',
+          clientId: 'kimi',
+          accountRef: 'kimi',
+          defaultModel: 'kimi-k2.5',
+        }),
+      });
+      assert.equal(kimiRes.statusCode, 201);
+
+      const catalog = JSON.parse(readFileSync(join(projectRoot, '.cat-cafe', 'cat-catalog.json'), 'utf-8'));
+      const breeds = catalog.breeds;
+      const kimiVariant = breeds.find((breed) => breed.catId === 'runtime-kimi')?.variants?.[0];
+
+      assert.equal(kimiVariant.clientId, 'kimi');
+      assert.deepEqual(kimiVariant.cli, { command: 'kimi', outputFormat: 'stream-json' });
+      assert.equal(kimiVariant.accountRef, 'kimi');
+    } finally {
+      await app.close();
+    }
+  });
+
   it('POST /api/cats falls back to the readable active project root when CAT_TEMPLATE_PATH is stale', async () => {
     const projectRoot = createMonorepoProjectRoot();
     const staleRoot = mkdtempSync(join(tmpdir(), 'cats-route-crud-stale-'));
@@ -1362,7 +1407,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     assert.equal(patchBody.cat.accountRef, 'codex');
   });
 
-  it('PATCH /api/cats/:id rebases inherited seed binding when switching client families', async () => {
+  it('PATCH /api/cats/:id rejects stale carried accountRef when switching client families', async () => {
     const projectRoot = createProjectRoot();
     process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
 
@@ -1386,7 +1431,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
         'content-type': 'application/json',
         'x-cat-cafe-user': 'codex',
       },
-      // Simulate editor payload carrying the previous visible accountRef while switching client.
+      // Simulate a stale client switch payload carrying the previous accountRef.
       body: JSON.stringify({
         clientId: 'openai',
         defaultModel: 'gpt-5.4',
@@ -1394,11 +1439,9 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
       }),
     });
 
-    assert.equal(patchRes.statusCode, 200);
+    assert.equal(patchRes.statusCode, 400);
     const patchBody = JSON.parse(patchRes.body);
-    assert.equal(patchBody.cat.clientId, 'openai');
-    assert.equal(patchBody.cat.defaultModel, 'gpt-5.4');
-    assert.equal(patchBody.cat.accountRef, 'codex');
+    assert.match(patchBody.error, /incompatible with client "openai"/i);
   });
 
   it('PATCH /api/cats/:id resets stale CLI config when switching client families', async () => {
@@ -1446,6 +1489,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
       body: JSON.stringify({
         clientId: 'openai',
         defaultModel: 'gpt-5.4',
+        accountRef: 'codex',
       }),
     });
 
@@ -1497,7 +1541,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
   });
 
   it('PATCH /api/cats/:id returns 400 when runtime catalog validation rejects the update', async () => {
-    const projectRoot = createProjectRoot();
+    const projectRoot = createProjectRootFromRepoTemplate();
     process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
 
     const Fastify = (await import('fastify')).default;
@@ -1721,9 +1765,8 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     );
   });
 
-  it('DELETE /api/cats/:id blocks deletion for seed members', async () => {
-    const projectRoot = createProjectRoot();
-    process.env.CAT_TEMPLATE_PATH = join(projectRoot, 'cat-template.json');
+  it('DELETE /api/cats/:id rejects deleting seed members with 409', async () => {
+    const projectRoot = createProjectRootFromRepoTemplate();
 
     const Fastify = (await import('fastify')).default;
     const { catsRoutes } = await import('../dist/routes/cats.js');
@@ -1742,6 +1785,7 @@ describe('cats routes runtime CRUD', { concurrency: false }, () => {
     const deleteBody = JSON.parse(deleteRes.body);
     assert.match(deleteBody.error, /cannot delete seed cat/i);
 
+    // Verify opus is still present
     const listRes = await app.inject({ method: 'GET', url: '/api/cats' });
     assert.equal(listRes.statusCode, 200);
     const listBody = JSON.parse(listRes.body);

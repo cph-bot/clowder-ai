@@ -913,6 +913,61 @@ created: 2026-02-26
 
 ---
 
+### LL-047: Socket.IO `cors` 不保护 WebSocket — `allowRequest` 才是安全边界
+- 状态：validated
+- 更新时间：2026-04-10
+
+- 背景：Cat Cafe Hub 的 Socket.IO 实时通道被发现存在 CSWSH（Cross-Site WebSocket Hijacking）风险。`Origin: https://evil.example` 可以成功建立 WebSocket 连接到 `127.0.0.1:3004`
+
+- 影响：恶意网页可从任意 Origin 连接本机 WebSocket，冒充用户、监听消息、干扰猫猫工作
+
+- 根因：
+  1. **Socket.IO v4 的 `cors` 配置只对 HTTP long-polling 生效**，不校验 WebSocket upgrade 请求的 Origin 头（Socket.IO 官方文档 2026-02-16 明确标注）
+  2. 身份自报（`handshake.auth.userId`）无服务端校验
+  3. Room 无 ACL，任何连接可加入任意 room
+  4. @fastify/websocket 的 plain WS 端点（terminal PTY）完全绕过 Socket.IO，无任何 Origin 检查
+
+- 修复：
+  1. **Phase A**（PR #1041）：`allowRequest` hook 显式校验 Origin + 禁止自报 userId + 私网 Origin 收紧
+  2. **Phase B**（PR #1045）：terminal WS Origin gate + cancelAll 授权 + 全局 room ACL
+  3. **Phase D**（规划中）：HTTP session 替代自报身份 + Clickjacking + CSP + Prompt Injection 降权
+
+- 教训：
+  1. **框架的 CORS 配置 ≠ WebSocket 安全**——Socket.IO/Express 的 cors 中间件只管 HTTP，WebSocket upgrade 是独立的协议切换，必须在 upgrade 层单独校验
+  2. **本机 ≠ 安全**——浏览器同源策略不阻止 JS 向 localhost 发 WebSocket 连接，任何打开的网页都是潜在攻击面
+  3. **"能连上"比"能做什么"更危险**——一旦连接建立，后续的身份/Room/事件授权都是亡羊补牢；连接层拒绝是第一道也是最关键的防线
+  4. **Agent 产品的攻击面比传统 Web 应用更大**——Prompt Injection、工具调用误用、外部内容驱动的高危操作是传统安全审计不覆盖的维度
+
+- 来源锚点：
+  - F156 spec：`docs/features/F156-websocket-security-hardening.md`
+  - 三猫安全审计：*(internal reference removed)*
+  - PR #1041（Phase A）、PR #1045（Phase B）
+  - 外部参考：OpenClaw CVE-2026-25253 + ClawJacked（同类攻击链）
+
+### LL-048: 用户可感知状态禁止默认 TTL——静默消失按 P0 治理
+- 状态：validated
+- 更新时间：2026-04-10
+
+- 坑：F100 Self-Evolution 线程在创建 30 天后突然从 Hub UI 消失——不在列表、不在垃圾桶、搜索不到。铲屎官："太恐怖了！"
+- 根因：`RedisThreadStore.ts` 硬编码 `DEFAULT_TTL = 30 * 24 * 60 * 60`（30 天），thread 创建时调用 `EXPIRE`。但 `updateLastActive()` 只更新排序分数，**从不刷新 hash TTL**。到期后 Redis 静默删除 hash，而 sorted set index 因其他 thread 操作续期而存活——形成"索引有 ID 但 hash 已消失"的孤儿状态。
+- 触发条件：任何带非零 DEFAULT_TTL 的 Redis store（thread/message/task/summary/backlog/session 等），只要用户在 TTL 窗口内未触发恰好刷新 hash TTL 的操作，就会静默丢失。
+- 修复：
+  1. 全量止血：所有 16+ Redis store 的 DEFAULT_TTL 改为 0（persistent），`EXPIRE 0` / `SET EX 0` 陷阱用条件分支防御
+  2. 自愈机制：`get()` 发现 hash 缺失时从 message timeline 重建元数据（`recoverThreadFromMessages`）
+  3. 统一 key 续期：所有 detail 变更通过 `setDetailFields()`/`deleteDetailFields()` 自动调用 `applyKeyRetention()`
+  4. 文档 + .env.example 同步更新
+- 防护：
+  1. 铁律 #5"禁止用户状态静默消失"——默认持久化，TTL 只能 opt-in
+  2. 新增 Redis store 必须 DEFAULT_TTL=0，引入非零 TTL 需 P0 级审批
+  3. 任何 `EXPIRE` / `SET EX` 调用必须有 `> 0` 守卫，防止 TTL=0 变成立即删除
+- 来源锚点：
+  - 根因文件：`packages/api/src/domains/cats/services/stores/redis/RedisThreadStore.ts:32`
+  - 丢失 thread：`thread_mmlv4v2oq6dxefr6`（2026-03-11 创建，2026-04-10 过期）
+  - Feature spec：`docs/features/F100-self-evolution.md` line 54
+- 原理：**EXPIRE 0 = 立即删除**（Redis 语义）。框架层 TTL 默认值决定了用户数据的生死线——这不是"配置"，而是产品决策。opt-out 持久化 = 用户必须知道一个他们不可能知道的配置才能保住自己的数据，这在产品层面是不可接受的。
+
+---
+
 ## 8) 维护约定
 
 - 本文件是入口，不替代 ADR/bug-report 原文。

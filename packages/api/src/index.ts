@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { type CatConfig, type CatId, CORE_COMMANDS, catRegistry } from '@cat-cafe/shared';
 import type { RedisClient } from '@cat-cafe/shared/utils';
 import { createRedisClient, SessionStore } from '@cat-cafe/shared/utils';
+import fastifyCookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import fastifyWebsocket from '@fastify/websocket';
 import Fastify from 'fastify';
@@ -49,10 +50,10 @@ import {
   DeliveryCursorStore,
   GeminiAgentService,
   getEventAuditLog,
+  KimiAgentService,
   MemoryGovernanceStore,
   OpenCodeAgentService,
 } from './domains/cats/services/index.js';
-
 import { initPushNotificationService } from './domains/cats/services/push/PushNotificationService.js';
 import type { HandoffConfig } from './domains/cats/services/session/SessionSealer.js';
 import { SessionSealer } from './domains/cats/services/session/SessionSealer.js';
@@ -105,6 +106,8 @@ import {
   stopGithubReviewWatcher,
 } from './infrastructure/email/index.js';
 import { runSchedulerReplyUserIdBackfill } from './infrastructure/scheduler/scheduler-reply-userid-backfill.js';
+import { securityHeadersPlugin } from './infrastructure/security-headers.js';
+import { sessionAuthPlugin, sessionRoute } from './infrastructure/session-auth.js';
 import { SocketManager } from './infrastructure/websocket/index.js';
 import { configSecretsRoutes } from './routes/config-secrets.js';
 import { connectorWebhookRoutes } from './routes/connector-webhooks.js';
@@ -125,6 +128,7 @@ import {
   configRoutes,
   connectorHubRoutes,
   connectorMediaRoutes,
+  distillationRoutes,
   evidenceRoutes,
   executionDigestRoutes,
   exportRoutes,
@@ -142,6 +146,7 @@ import {
   mkdirRoute,
   packsRoutes,
   projectSetupRoute,
+  projectsBootstrapRoutes,
   projectsRoutes,
   pushRoutes,
   queueRoutes,
@@ -203,6 +208,11 @@ const PROCESS_START_AT = Date.now();
 
 async function main(): Promise<void> {
   const { logger: customLogger, isDebugMode, LOG_DIR_PATH } = await import('./infrastructure/logger.js');
+
+  // F152: Initialize OpenTelemetry SDK (must be early, before routes)
+  const { initTelemetry } = await import('./infrastructure/telemetry/init.js');
+  const shutdownTelemetry = initTelemetry();
+
   const app = Fastify({ logger: customLogger as unknown as import('fastify').FastifyBaseLogger });
 
   if (isDebugMode) {
@@ -214,6 +224,14 @@ async function main(): Promise<void> {
     origin: resolveFrontendCorsOrigins(process.env, app.log),
     credentials: true,
   });
+
+  // F156 D-2: Anti-clickjacking headers (X-Frame-Options + CSP frame-ancestors)
+  await app.register(securityHeadersPlugin);
+
+  // F156 D-1: Cookie parsing + session-based identity (replaces userId self-reporting)
+  await app.register(fastifyCookie);
+  await app.register(sessionAuthPlugin);
+  await app.register(sessionRoute);
 
   // WebSocket support (F089 terminal)
   await app.register(fastifyWebsocket);
@@ -231,6 +249,38 @@ async function main(): Promise<void> {
 
   // Health check
   app.get('/health', async () => ({ status: 'ok', timestamp: Date.now() }));
+
+  // F152: Readiness check — verifies dependencies are reachable.
+  // evidenceStoreRef is set after memoryServices init; handler runs at request time.
+  let evidenceStoreRef: { health(): Promise<boolean> } | null = null;
+  app.get('/ready', async (_request, reply) => {
+    const checks: Record<string, { ok: boolean; ms: number; error?: string }> = {};
+    // Redis probe
+    if (redisClient) {
+      const t0 = Date.now();
+      try {
+        await redisClient.ping();
+        checks.redis = { ok: true, ms: Date.now() - t0 };
+      } catch (err) {
+        checks.redis = { ok: false, ms: Date.now() - t0, error: String(err) };
+      }
+    } else {
+      checks.redis = { ok: true, ms: 0 }; // memory mode, always ready
+    }
+    // SQLite probe
+    if (evidenceStoreRef) {
+      const t0 = Date.now();
+      try {
+        const ok = await evidenceStoreRef.health();
+        checks.sqlite = { ok, ms: Date.now() - t0, ...(ok ? {} : { error: 'SELECT 1 failed' }) };
+      } catch (err) {
+        checks.sqlite = { ok: false, ms: Date.now() - t0, error: String(err) };
+      }
+    }
+    const allOk = Object.values(checks).every((c) => c.ok);
+    if (!allOk) reply.code(503);
+    return { status: allOk ? 'ready' : 'degraded', timestamp: Date.now(), checks };
+  });
 
   // Create invocation tracker for cancellation support
   const invocationTracker = new InvocationTracker();
@@ -361,8 +411,8 @@ async function main(): Promise<void> {
         }
         const catConfig = catRegistry.tryGet(catId)?.config;
         if (catConfig?.clientId === 'anthropic' || catConfig?.clientId === 'opencode') {
-          const boundAccountRef = resolveBoundAccountRefForCat(projectRoot, catId, catConfig);
-          const runtime = resolveForClient(projectRoot, catConfig.clientId, boundAccountRef);
+          const effectiveAccountRef = resolveBoundAccountRefForCat(projectRoot, catId, catConfig);
+          const runtime = resolveForClient(projectRoot, catConfig.clientId, effectiveAccountRef);
           if (!runtime?.apiKey) return null;
           return { apiKey: runtime.apiKey, baseUrl: runtime.baseUrl || 'https://api.anthropic.com' };
         }
@@ -440,7 +490,30 @@ async function main(): Promise<void> {
       return excluded;
     },
   });
+  // F152: Wire evidence store into /ready probe
+  evidenceStoreRef = memoryServices.evidenceStore;
   app.log.info('[api] F102: SQLite memory services initialized');
+
+  // F152 Phase B: Expedition Bootstrap — state manager + service
+  const { IndexStateManager } = await import('./domains/memory/IndexStateManager.js');
+  const { ExpeditionBootstrapService } = await import('./domains/memory/ExpeditionBootstrapService.js');
+  const indexStateManager = new IndexStateManager(memoryServices.store.getDb());
+  const { execFileSync } = await import('node:child_process');
+  const expeditionBootstrapService = new ExpeditionBootstrapService(indexStateManager, {
+    rebuildIndex: async (projectPath: string) => {
+      const startMs = Date.now();
+      const { buildStructuralSummary } = await import('./domains/memory/ExpeditionBootstrapService.js');
+      const summary = buildStructuralSummary(projectPath);
+      return { docsIndexed: summary.docsList.length, durationMs: Date.now() - startMs };
+    },
+    getFingerprint: (projectPath: string) => {
+      try {
+        return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: projectPath, encoding: 'utf-8' }).trim();
+      } catch {
+        return '';
+      }
+    },
+  });
 
   // F102 D-2: Auto-rebuild evidence index on startup (AC-D4)
   if (memoryServices.indexBuilder) {
@@ -533,6 +606,7 @@ async function main(): Promise<void> {
   const { DynamicTaskStore } = await import('./infrastructure/scheduler/DynamicTaskStore.js');
   const { templateRegistry } = await import('./infrastructure/scheduler/templates/registry.js');
   const dynamicTaskStore = new DynamicTaskStore(schedulerDb);
+  taskRunnerV2.setDynamicTaskStore(dynamicTaskStore); // #415: wire store for once-trigger auto-retirement
 
   // ── F139 Phase 2+3A+3B: Schedule panel API routes ──
   const { scheduleRoutes } = await import('./routes/schedule.js');
@@ -543,6 +617,7 @@ async function main(): Promise<void> {
     globalControlStore,
     packTemplateStore,
     taskStore,
+    deliver: schedulerDeliver,
   });
 
   // ── Phase G: Summary Compaction (registers into unified scheduler) ──
@@ -561,9 +636,9 @@ async function main(): Promise<void> {
           if (process.env.F102_API_BASE && process.env.F102_API_KEY) {
             return { mode: 'api_key' as const, baseUrl: process.env.F102_API_BASE, apiKey: process.env.F102_API_KEY };
           }
-          // Priority 2: resolve via full discovery chain (#340: system callers use resolveForClient)
-          const profile = resolveForClient(process.cwd(), 'anthropic');
-          const apiKey = profile?.apiKey;
+          // Priority 2: deterministic binding with installer-only fallback (502 regression)
+          const runtimeProfile = resolveAnthropicRuntimeProfile(process.cwd());
+          const apiKey = runtimeProfile.apiKey;
           if (!apiKey) return null;
           const proxyPort = process.env.ANTHROPIC_PROXY_PORT || '9877';
           // Read first upstream slug from proxy-upstreams.json
@@ -790,6 +865,9 @@ async function main(): Promise<void> {
           }
           break;
         }
+        case 'kimi':
+          service = new KimiAgentService({ catId });
+          break;
         case 'dare':
           service = new DareAgentService({ catId });
           break;
@@ -1169,6 +1247,7 @@ async function main(): Promise<void> {
     taskStore,
     backlogStore,
     threadStore,
+    agentRegistry,
     router,
     invocationRecordStore,
     invocationTracker,
@@ -1270,7 +1349,15 @@ async function main(): Promise<void> {
   await app.register(projectsRoutes);
   await app.register(mkdirRoute);
   await app.register(governanceStatusRoute);
-  await app.register(projectSetupRoute);
+  await app.register(projectSetupRoute, {
+    memoryBootstrapService: expeditionBootstrapService as { bootstrap: (p: string, o?: unknown) => Promise<unknown> },
+    socketManager: socketManager ?? undefined,
+  });
+  await app.register(projectsBootstrapRoutes, {
+    stateManager: indexStateManager,
+    bootstrapService: expeditionBootstrapService,
+    socketManager: socketManager!,
+  });
   await app.register(exportRoutes, { messageStore, threadStore });
   await app.register(configRoutes);
   await app.register(configSecretsRoutes);
@@ -1342,6 +1429,17 @@ async function main(): Promise<void> {
     indexBuilder: memoryServices.indexBuilder,
     knowledgeResolver: memoryServices.knowledgeResolver,
   });
+
+  // F152 Phase C: Distillation routes (global lesson reflow)
+  if (memoryServices.globalStore) {
+    const { DistillationService } = await import('./domains/memory/distillation-service.js');
+    const distillationService = new DistillationService(memoryServices.store, memoryServices.globalStore);
+    await distillationService.initialize();
+    await app.register(distillationRoutes, {
+      evidenceStore: memoryServices.evidenceStore,
+      distillationService,
+    });
+  }
 
   // F129: Pack system routes (reuse shared packStore from above)
   {
@@ -1614,6 +1712,7 @@ async function main(): Promise<void> {
         anthropic: join(root, '.mcp.json'),
         openai: join(root, '.codex', 'config.toml'),
         google: join(root, '.gemini', 'settings.json'),
+        kimi: join(root, '.kimi', 'mcp.json'),
       });
       app.log.info('[api] CLI configs regenerated at startup');
     }
@@ -2091,6 +2190,13 @@ async function main(): Promise<void> {
       } catch (err) {
         exitCode = 1;
         app.log.error(`[api] SocketManager close failed: ${String(err)}`);
+      }
+
+      // F152: Flush and shutdown OTel SDK before closing server
+      try {
+        await shutdownTelemetry();
+      } catch (err) {
+        app.log.error(`[api] OTel shutdown failed: ${String(err)}`);
       }
 
       // Close Fastify server

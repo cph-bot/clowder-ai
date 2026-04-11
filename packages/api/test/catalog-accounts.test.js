@@ -272,12 +272,13 @@ describe('global accounts (F340)', () => {
     await rmAsync(projectB, { recursive: true, force: true });
   });
 
-  it('throws when project catalog migration hits an incompatible global account ID', async () => {
+  it('skips conflicting project catalog accounts without crashing (global wins)', async () => {
     const { readCatalogAccounts, resetMigrationState, writeCatalogAccount } = await import(
       '../dist/config/catalog-accounts.js'
     );
     resetMigrationState();
 
+    // Global already has 'shared' with different fields
     writeCatalogAccount(projectRoot, 'shared', {
       authType: 'api_key',
       baseUrl: 'https://global.example/v1',
@@ -285,6 +286,7 @@ describe('global accounts (F340)', () => {
     });
     resetMigrationState();
 
+    // Project catalog has a stale version of 'shared'
     await writeFile(
       join(projectRoot, '.cat-cafe', 'cat-catalog.json'),
       JSON.stringify({
@@ -303,7 +305,11 @@ describe('global accounts (F340)', () => {
       'utf-8',
     );
 
-    assert.throws(() => readCatalogAccounts(projectRoot), /account conflict/i);
+    // Should NOT throw — project catalog is stale, global wins
+    const result = readCatalogAccounts(projectRoot);
+    // Global version preserved, not overwritten by stale project version
+    assert.equal(result.shared.baseUrl, 'https://global.example/v1');
+    assert.equal(result.shared.displayName, 'Global Shared');
   });
 
   it('migrates v1 nested providers.<client>.profiles[] into flat accounts', async () => {
@@ -359,7 +365,7 @@ describe('global accounts (F340)', () => {
     assert.equal(creds['team-key'].apiKey, 'sk-team-key');
   });
 
-  it('throws when legacy provider-profile migration hits an incompatible global account ID', async () => {
+  it('skips conflicting legacy provider-profile without crashing (global wins)', async () => {
     const { readCatalogAccounts, resetMigrationState, writeCatalogAccount } = await import(
       '../dist/config/catalog-accounts.js'
     );
@@ -387,7 +393,9 @@ describe('global accounts (F340)', () => {
       'utf-8',
     );
 
-    assert.throws(() => readCatalogAccounts(projectRoot), /account conflict/i);
+    const result = readCatalogAccounts(projectRoot);
+    assert.equal(result.shared.authType, 'oauth', 'global account must win over legacy');
+    assert.equal(result.shared.displayName, 'Global OAuth', 'global displayName must be preserved');
   });
 
   it('retries secret import when accounts already exist from previous migration', async () => {
@@ -424,7 +432,7 @@ describe('global accounts (F340)', () => {
     assert.equal(creds['my-custom'].apiKey, 'sk-retry-key', 'credential must be imported on retry');
   });
 
-  it('fails before attaching a legacy secret to a pre-existing global account with colliding ID', async () => {
+  it('skips legacy secret when colliding with pre-existing global OAuth account', async () => {
     const { readCatalogAccounts, resetMigrationState, writeCatalogAccount } = await import(
       '../dist/config/catalog-accounts.js'
     );
@@ -448,9 +456,10 @@ describe('global accounts (F340)', () => {
       'utf-8',
     );
 
-    assert.throws(() => readCatalogAccounts(projectRoot), /account conflict/i);
+    // Must not crash — global wins, secret must NOT be imported
+    const result = readCatalogAccounts(projectRoot);
+    assert.equal(result.shared.authType, 'oauth', 'global OAuth account must win');
 
-    // The legacy secret must NOT be imported for the colliding ID.
     const credPath = join(globalRoot, '.cat-cafe', 'credentials.json');
     if (existsSync(credPath)) {
       const creds = JSON.parse(await readFile(credPath, 'utf-8'));
@@ -480,7 +489,7 @@ describe('global accounts (F340)', () => {
     assert.ok(!existsSync(globalFile), 'accounts.json should NOT be in globalRoot when env unset');
   });
 
-  it('fails before attaching a legacy secret to a different-source api_key account with colliding ID', async () => {
+  it('skips legacy secret when colliding with different-source api_key account', async () => {
     const { readCatalogAccounts, resetMigrationState, writeCatalogAccount } = await import(
       '../dist/config/catalog-accounts.js'
     );
@@ -504,7 +513,10 @@ describe('global accounts (F340)', () => {
       'utf-8',
     );
 
-    assert.throws(() => readCatalogAccounts(projectRoot), /account conflict/i);
+    // Must not crash — global wins, secret must NOT be imported
+    const result = readCatalogAccounts(projectRoot);
+    assert.equal(result.shared.authType, 'api_key', 'global account must win');
+    assert.equal(result.shared.baseUrl, 'https://existing.example/v1', 'global baseUrl must be preserved');
 
     const credPath = join(globalRoot, '.cat-cafe', 'credentials.json');
     if (existsSync(credPath)) {
