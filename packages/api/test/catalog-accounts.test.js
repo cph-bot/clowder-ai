@@ -179,6 +179,49 @@ describe('global accounts (F340)', () => {
     assert.equal(creds['my-custom'].apiKey, 'sk-secret-123');
   });
 
+  it('ignores builtin placeholders from project cat-catalog accounts during legacy migration', async () => {
+    const { readCatalogAccounts, resetMigrationState } = await import('../dist/config/catalog-accounts.js');
+    resetMigrationState();
+
+    await writeFile(
+      join(projectRoot, '.cat-cafe', 'provider-profiles.json'),
+      JSON.stringify({
+        version: 3,
+        providers: [
+          {
+            id: 'claude',
+            authType: 'oauth',
+            displayName: 'Claude',
+            models: ['claude-opus-4-5-20251101', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6'],
+          },
+        ],
+      }),
+      'utf-8',
+    );
+
+    await writeFile(
+      join(projectRoot, '.cat-cafe', 'cat-catalog.json'),
+      JSON.stringify({
+        version: 2,
+        breeds: [],
+        roster: {},
+        reviewPolicy: {},
+        accounts: {
+          claude: {
+            authType: 'oauth',
+            protocol: 'anthropic',
+            displayName: 'Claude (builtin)',
+          },
+        },
+      }),
+      'utf-8',
+    );
+
+    const result = readCatalogAccounts(projectRoot);
+    assert.equal(result.claude.displayName, 'Claude');
+    assert.deepEqual(result.claude.models, ['claude-opus-4-5-20251101', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6']);
+  });
+
   it('propagates global legacy provider-profile migration errors instead of failing open', async () => {
     const { readCatalogAccounts, resetMigrationState } = await import('../dist/config/catalog-accounts.js');
     resetMigrationState();

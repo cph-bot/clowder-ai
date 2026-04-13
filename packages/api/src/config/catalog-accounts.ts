@@ -124,6 +124,24 @@ function accountsEquivalent(existing: AccountConfig, incoming: AccountConfig): b
   return describeAccountConflict(existing, incoming).length === 0;
 }
 
+const PROJECT_CATALOG_BUILTIN_PLACEHOLDER_DISPLAY_NAMES = new Set([
+  'Claude (builtin)',
+  'Codex (builtin)',
+  'Gemini (builtin)',
+  'Dare (builtin)',
+  'OpenCode (builtin)',
+]);
+
+function isProjectCatalogBuiltinPlaceholder(ref: string, account: AccountConfig): boolean {
+  if (account.authType !== 'oauth') return false;
+  if (!PROJECT_CATALOG_BUILTIN_PLACEHOLDER_DISPLAY_NAMES.has(normalizeDisplayName(account.displayName) ?? '')) {
+    return false;
+  }
+  if (normalizeBaseUrl(account.baseUrl)) return false;
+  if (normalizeModels(account.models)?.length) return false;
+  return ['claude', 'codex', 'gemini', 'dare', 'opencode'].includes(ref);
+}
+
 function normalizeLegacyAuthType(value: unknown): AccountConfig['authType'] | undefined {
   const normalized = String(value ?? '')
     .trim()
@@ -310,8 +328,17 @@ function migrateProjectAccountsToGlobal(projectRoot: string): void {
     const catalog = JSON.parse(raw);
     const projectAccounts = catalog?.accounts;
     if (!projectAccounts || typeof projectAccounts !== 'object' || Object.keys(projectAccounts).length === 0) return;
+    const migratableAccounts = Object.fromEntries(
+      Object.entries(projectAccounts as Record<string, AccountConfig>).filter(
+        ([ref, account]) => !isProjectCatalogBuiltinPlaceholder(ref, account),
+      ),
+    );
+    if (Object.keys(migratableAccounts).length === 0) {
+      migratedProjects.add(key);
+      return;
+    }
 
-    const { merged } = mergeIntoGlobal(projectAccounts as Record<string, AccountConfig>, projectRoot);
+    const { merged } = mergeIntoGlobal(migratableAccounts, projectRoot);
 
     // F340: project catalog.accounts is intentionally left untouched.
     // Runtime only reads global accounts.json, so the project section is
